@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "User Preferences Update",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["userId", "productIds"],
+  "properties": {
+    "userId": { "$ref": "../_common/uuid.json" },
+    "productIds": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "maxItems": 100
+    }
+  }
+}

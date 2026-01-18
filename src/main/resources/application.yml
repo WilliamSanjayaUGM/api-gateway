@@ -1,0 +1,39 @@
+spring:
+  config:
+    import: "optional:consul:"
+  application:
+    name: api-gateway
+  profiles:
+    active: dev
+  cloud:
+    consul:
+      host: localhost
+      port: 8500
+      config:
+        name: application
+        defaultContext: api-gateway
+        enabled: true
+        format: yaml
+        prefixes: 
+          - config
+        profile-separator: ","
+        data-key: data
+        watch:
+          enabled: true
+        include-profile-specific-sources: true
+        fail-fast: true
+        retry:
+          initial-interval: 1000
+          max-attempts: 6
+          multiplier: 1.5
+    leader:
+      enabled: true
+      namespace: geoip-leader
+
+server:
+  port: 4000
+
+logging:
+  level:
+    org.springframework.boot.actuate.endpoint.web: DEBUG
+    org.springframework.cloud.consul.config: TRACE

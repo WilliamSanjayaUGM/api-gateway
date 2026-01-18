@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "User Profile Update",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["userId", "email"],
+  "properties": {
+    "userId": { "$ref": "../_common/uuid.json" },
+    "email": { "$ref": "../_common/email.json" },
+    "displayName": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 80
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Payment Initiation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["userId", "amount", "currency", "paymentMethodId"],
+  "properties": {
+    "userId": { "$ref": "../_common/uuid.json" },
+    "amount": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "currency": {
+      "type": "string",
+      "enum": ["USD", "EUR", "IDR", "GBP", "SGD"]
+    },
+    "paymentMethodId": { "$ref": "../_common/uuid.json" }
+  }
+}

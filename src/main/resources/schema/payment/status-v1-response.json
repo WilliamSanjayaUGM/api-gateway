@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PaymentStatusResponse",
+  "type": "object",
+  "additionalProperties": false,
+
+  "allOf": [{ "$ref": "../_common/base-response.json" }],
+
+  "required": ["paymentId", "status"],
+
+  "properties": {
+    "paymentId": { "$ref": "../_common/uuid.json" },
+    "status": { "type": "string", "enum": ["PENDING", "SUCCESS", "FAILED"] }
+  }
+}

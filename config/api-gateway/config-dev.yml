@@ -1,0 +1,450 @@
+server:
+  port: 4000
+  forward-headers-strategy: native
+  ssl:
+    enabled: false #false in dev so it wouldn't redirect to https
+  #   protocol: TLS
+  #   enabled-protocols: TLSv1.3,TLSv1.2
+  #   ciphers: >
+  #     TLS_AES_256_GCM_SHA384,
+  #     TLS_CHACHA20_POLY1305_SHA256,
+  #     TLS_AES_128_GCM_SHA256
+  #   key-store: classpath:keystore/gateway-server-keystore.p12
+  #   key-store-password: ${GATEWAY_KEYSTORE_PASSWORD}
+  #   key-store-type: PKCS12
+  #   key-alias: gateway
+  #   trust-store: classpath:keystore/gateway-truststore.p12
+  #   trust-store-password: ${GATEWAY_TRUSTSTORE_PASSWORD}
+  #   trust-store-type: PKCS12
+  #   client-auth: need
+  # http2:
+  #   enabled: true
+  max-http-request-header-size: 16KB
+  reactive:
+    max-initial-line-length: 8KB
+  netty:
+    max-header-size: 8KB
+    max-initial-line-length: 4KB
+    validate-headers: true
+
+spring:
+  application:
+    name: api-gateway
+  http:
+    codecs:
+      max-in-memory-size: 1MB
+  cloud:
+    consul:
+      discovery:
+        reactive:
+          enabled: true
+          register: true
+          service-name: api-gateway
+          prefer-ip-address: true
+          heartbeat:
+            enabled: true
+          health-check-interval: 15s
+    gateway:
+      default-filters:
+        - DedupeResponseHeader=Access-Control-Allow-Origin Access-Control-Allow-Credentials
+        # - name: SecureHeaders   # adds XSS, FrameOptions, CSP, etc. No need anymore because already have our own SecurityHeaderFilter
+      server:
+        webflux:
+          discovery:
+            locator:
+              enabled: true
+              lower-case-service-id: true
+          globalcors:
+            add-to-simple-url-handler-mapping: true
+            cors-configurations:
+              '[/**]':
+                allowedOrigins:
+                  - "https://frontend.example.com"
+                  - "http://localhost:3000"
+                  - "http://localhost:5173"
+                allowedMethods: [GET, POST, PUT, DELETE, OPTIONS]
+                allowedHeaders:
+                  - Authorization
+                  - Content-Type
+                  - X-Captcha-Response
+                  - X-Trace-Id
+                  - X-Requested-With
+                exposedHeaders:
+                  - ETag
+                  - X-RateLimit-Remaining
+                  - X-RateLimit-Reset
+                allowCredentials: true
+                maxAge: 3600   # cache CORS preflight for 1h
+          routes:
+            - id: keycloak
+              uri: http://localhost:8180
+              predicates:
+                - Path=/realms/*/protocol/openid-connect/auth,/realms/*/protocol/openid-connect/token
+              filters:
+                - name: Bucket4jRateLimit
+                  args:
+                    cacheName: buckets-login
+                    keyResolver: bean:userIpKeyResolver   # e.g., bean:UserIpKeyResolver
+                    rateLimits:
+                      - bandwidths:
+                          - capacity: 10
+                            time: 1
+                            refill-speed: interval
+                          - capacity: 500
+                            time: 3600
+                            refill-speed: interval
+                    failOpen: false
+                    includePathInKey: false
+              metadata:
+                internal-auth: none
+            - id: auth-service
+              uri: lb://groceries-auth
+              predicates:
+                - Path=/auth/**
+              filters:
+                - RewritePath=/auth/(?<segment>.*), /v1/auth/${segment}
+              metadata:
+                internal-auth: none  
+            - id: dashboard-service
+              uri: lb://dashboard-service
+              predicates:
+                - Path=/dashboard/**
+              filters:
+                - RewritePath=/dashboard/(?<segment>.*), /v1/dashboard/${segment}
+            - id: product-static
+              uri: lb://product-service
+              predicates:
+                - Path=/product-detail/static/**
+              filters:
+                - RewritePath=/product-detail/static/(?<segment>.*), /v1/product/static/${segment}
+            - id: product-service
+              uri: lb://product-service
+              predicates:
+                - Path=/product-detail/**
+              filters:
+                - RewritePath=/product-detail/(?<segment>.*), /v1/product/${segment}
+                - name: Bucket4jRateLimit
+                  args:
+                    cacheName: buckets-product
+                    keyResolver: userIpKeyResolver   # e.g., bean:UserIpKeyResolver
+                    rateLimits:
+                      - bandwidths:
+                          - capacity: 10
+                            time: 1
+                            refill-speed: interval
+                          - capacity: 500
+                            time: 3600
+                            refill-speed: interval
+                    failOpen: false
+                    includePathInKey: false
+              metadata:
+                internal-auth: required
+                audience: product-service
+            - id: order-service
+              uri: lb://order-service
+              predicates:
+                - Path=/order/**
+              filters:
+                - RewritePath=/order/(?<segment>.*), /v1/order/${segment}
+            - id: shipping-service
+              uri: lb://shipping-service
+              predicates:
+                - Path=/shipping/**
+              filters:
+                - RewritePath=/shipping/(?<segment>.*), /v1/shipping/${segment}
+            - id: pre-order-service
+              uri: lb://pre-order-service
+              predicates:
+                - Path=/poRequest/**
+              filters:
+                - RewritePath=/poRequest/(?<segment>.*), /v1/poRequest/${segment}
+            - id: user-service
+              uri: lb://user-service
+              predicates:
+                - Path=/user/**
+              filters:
+                - RewritePath=/user/(?<segment>.*), /v1/user/${segment}
+
+      trust:
+        proxies:
+          - "127.0.0.1"
+          - "::1"
+          - "10.0.0.0/8"
+          - "172.16.0.0/12"
+          - "192.168.0.0/16"
+      max-body-size-bytes: 524288   # 512 KB
+
+gateway:
+  cache:
+    max-etag-body-size: 2097152
+    cache-control: public, max-age=3600
+    etag: true
+    last-modified: true
+    default-ttl: 600
+    skip-if-no-content-length: true
+    warn-threshold: 200000
+
+security:
+  oauth2:
+    opaque-token:
+      introspection-uri: http://localhost:8180/realms/pt-sanjaya-grocery/protocol/openid-connect/token/introspect
+      client-id: ${OAUTH_CLIENT_ID}
+      client-secret: ${OAUTH_CLIENT_SECRET}
+      expected-audience: api-gateway
+      expected-issuer: http://localhost:8180/realms/pt-sanjaya-grocery
+      trusted-roles:
+        - CUSTOMER
+        - SUPPLIER
+        - ADMIN
+        - MANAGER
+      auto-refresh-trusted-roles: true
+      keycloak-roles-endpoint: http://localhost:8180/realms/pt-sanjaya-grocery/protocol/openid-connect/roles
+    cache:
+      introspection-cache-ttl-minutes: 5
+    resourceserver:
+      jwk-public-key: ${JWK_PUBLIC_KEY}
+      jwk-public-key-uri: http://localhost:8180/realms/pt-sanjaya-grocery/protocol/openid-connect/certs
+    excluded-paths:
+      - /auth/signup
+      - /auth/verify-email
+      - /auth/forgot-password
+      - /auth/reset-password
+      - /auth/step-up
+      - /auth/step-up/callback
+      - /actuator/health
+      - /actuator/info
+      - /v1/auth/signup
+      - /v1/auth/step-up
+      - /v1/auth/step-up/callback
+      - /oauth-proxy/login
+      - /oauth-proxy/callback
+      - /realms/*/protocol/openid-connect/auth
+      - /realms/*/protocol/openid-connect/token
+  user-agent:
+    enabled: true
+    min-length: 10
+    max-length: 256
+    blocked-patterns:
+      - "curl"
+      - "wget"
+      - "sqlmap"
+      - "nikto"
+      - "acunetix"
+      - "nessus"
+      - "burp"
+    allowed-patterns: [ ]        # fill if you want strict allow list
+    allow-empty-for-internal: true
+    fingerprint-header-name: X-Client-Fingerprint
+    fingerprint-hmac-secret: ${USER_AGENT_HMAC_SECRET}
+    max-distinct-chars: 80
+    require-ja3-for-private-apis: true
+    ja3-header-name: X-JA3-Fingerprint        # set by nginx / ingress
+    require-ja3-for-public: false        # start with false, then tune
+    allowed-ja3-fingerprints: [ ]        # fill after you collect from real browsers
+
+    enable-ua-consistency-check: false   # start with observe-only
+    block-on-ua-inconsistency: false
+
+  tls-fingerprint:
+    enabled: true
+    # Known bad fingerprints (add slowly)
+    known-bad-ja3:
+      - "771,4865-4866-4867,0-11-10-35-16-5-13,23-24,0"
+      - "769,47-53-5-10,0-11-10-35,23-24,0"
+    # curl / python TLS stacks pretending to be browsers
+    curl-like-ja3:
+      - "771,4865-4866-4867,0-11-10-35,23-24,0"
+      - "771,49195-49199-49196,0-11-10,23,0"
+    # JA4 downgrade or abnormal traits
+    downgrade-patterns:
+      - "TLSv1.0"
+      - "TLSv1.1"
+      - "NULL_CIPHER"
+      - "RC4"
+      - "NO_SNI"
+    # Internal traffic expectations
+    require-ja3-for-internal: true
+    # Risk safety
+    max-risk-score: 100
+    score-only: true
+
+  headers:
+    hsts:
+      enabled: true
+      max-age: 31536000
+      include-sub-domains: true
+      preload: true
+    csp:
+      enabled: true
+      directives: "default-src 'self'; script-src 'self' 'nonce-{nonce}'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://auth.example.com https://api.example.com; frame-ancestors 'none'; object-src 'none'; base-uri 'self'"
+    permissions-policy: "geolocation=(), microphone=(), camera=(), fullscreen=(self), payment=()"
+    referrer-policy: "strict-origin-when-cross-origin"
+    xss-protection: "0"
+    frame-options: "DENY"
+    cross-origin-opener-policy: "same-origin"
+    cross-origin-embedder-policy: "require-corp"
+    cross-origin-resource-policy: "same-origin"
+  internal-jwt:
+    issuer: api-gateway
+    ttl-seconds: 60
+    keys:
+      k1: ${INTERNAL_JWT_KEY_K1_BASE64}
+      k2: ${INTERNAL_JWT_KEY_K2_BASE64}
+    active-key-id: k1
+  session:
+    cookie-name: API-SESSION
+    sessionTtlSeconds: 900 # 8 hours
+
+bucket4j:
+  enabled: true
+  timeout-ms: 750
+  filters:
+    - cache-name: buckets-login
+      url: /realms/pt-sanjaya-grocery/protocol/openid-connect/token
+      key-resolver: userIpKeyResolver
+      rate-limits:
+        - bandwidths:
+            - capacity: 5
+              time: 60
+              refill-speed: interval
+      failOpen: false
+      http-status: 429
+      filter-name: captchaRateLimit
+      service: login-service
+    - cache-name: buckets-signup
+      url: /auth/signup
+      key-resolver: userIpKeyResolver
+      rate-limits:
+        - bandwidths:
+            - capacity: 5
+              time: 300
+              refill-speed: interval
+      failOpen: false
+      http-status: 429
+      filter-name: signupRateLimit
+      service: signup-service
+
+schema:
+  enabled: true
+  # Header used for version negotiation (optional)
+  version-header: X-Schema-Version
+  default-version: v1
+
+  # Request validation
+  request:
+    enabled: true
+    max-body-size-bytes: 2000000   # 2 MB
+    max-depth: 50
+  # Response validation (you can disable in prod if too strict)
+  response:
+    enabled: false                 # start with false, turn on later
+    max-body-size-bytes: 2000000
+    max-depth: 50
+    fail-on-error: false
+  # Paths that you do NOT want to validate at the gateway,
+  excluded-paths:
+    - /auth/refresh-token
+    - /auth/verify-email
+    - /auth/forgot-password
+    - /auth/reset-password
+    - /auth/step-up
+    - /auth/step-up/callback
+    - /oauth-proxy/login
+    - /oauth-proxy/callback
+  # Hot reload (works nicely with Consul config refresh / GitOps)
+  reload-on-config-change: true
+  # Folder → gateway path pattern
+  # Folder names correspond to /schema/<folder>/ in resources.
+  mapping:
+    auth: "/auth/{name}"        # signup-v1.json → /auth/signup
+    user: "/user/{name}"        # create-v1.json → /user/create
+    payment: "/payment/{name}"  # pay-v1.json   → /payment/pay
+    common: "/{folder}/{name}"  # optional generic group
+
+
+keycloak:
+  realm: pt-sanjaya-grocery
+  # auth-server-url: http://localhost:8180
+  auth-server-url: http://localhost:8080
+  webclient:
+    ssl-bundle: "key"
+
+app:
+  oauth2:
+    redirect-uri: http://localhost:4000/oauth-proxy/callback
+    frontend-origin: http://localhost:8088
+  dev-mode: true
+
+geoip:
+  blocked-countries:
+    - RU
+    - CN
+    - KP
+  high-risk-countries:
+    - NG
+    - BR
+    - VN
+  whitelist:
+    countries: "ID,SG,MY"
+  cache:
+    prefix: geoip
+  local-path: classpath:geo/GeoLite2-Country.mmdb
+  refresh:
+    enabled: true
+    leader-only: false
+    remote-url: https://example.com/GeoLite2-Country.mmdb
+    expected-sha256: ${GEOIP_EXPECTED_SHA256}
+  fail-fast: true
+  webclient:
+    ssl-bundle: "key"
+
+tls:
+  keycloak:
+    client-cert: file:/etc/gateway/certs/keycloak-client.p12
+    client-cert-password: ${KEYCLOAK_CLIENT_P12_PASSWORD}
+  geoip:
+    client-cert: ""
+    client-cert-password: ""
+
+volumeMounts:
+  - name: mtls-certs
+    mountPath: /certs
+    readOnly: true
+
+volumes:
+  - name: mtls-certs
+    secret:
+      secretName: gateway-mtls-secret
+
+logging:
+  level:
+    org.springframework.cloud.gateway: INFO
+    org.springframework.cloud.gateway.route.RouteDefinitionRouteLocator: DEBUG
+    org.springframework.cloud.gateway.handler.predicate: DEBUG
+    org.springframework.security.oauth2: WARN
+    org.springframework.web.reactive.function.client.ExchangeFunctions: WARN
+    reactor.netty.http.client: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} %-5level [%X{traceId}] %logger{36} - %msg%n"
+
+management:
+  server:
+    port: 9001
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    prometheus:
+      access: unrestricted
+    health:
+      show-details: always
+  metrics:
+    enable:
+      all: true
+    tags:
+      application: api-gateway
+  prometheus:
+    metrics:
+      export:
+        enabled: true

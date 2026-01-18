@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SignupResponse",
+  "type": "object",
+  "additionalProperties": false,
+
+  "allOf": [{ "$ref": "../_common/base-response.json" }],
+
+  "required": ["userId", "requiresEmailVerification"],
+
+  "properties": {
+    "userId": { "$ref": "classpath:/schema/_common/uuid.json" },
+    "email": { "$ref": "classpath:/schema/_common/email.json" },
+    "requiresEmailVerification": { "type": "boolean" }
+  }
+}

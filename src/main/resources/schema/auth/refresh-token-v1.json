@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Refresh Token Request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["refreshToken"],
+  "properties": {
+    "refreshToken": {
+      "type": "string",
+      "minLength": 32
+    }
+  }
+}

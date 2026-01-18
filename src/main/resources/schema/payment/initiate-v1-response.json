@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PaymentInitiateResponse",
+  "type": "object",
+  "additionalProperties": false,
+
+  "allOf": [{ "$ref": "../_common/base-response.json" }],
+
+  "required": ["paymentId", "redirectUrl"],
+
+  "properties": {
+    "paymentId": { "$ref": "../_common/uuid.json" },
+    "redirectUrl": { "type": "string", "format": "uri" }
+  }
+}

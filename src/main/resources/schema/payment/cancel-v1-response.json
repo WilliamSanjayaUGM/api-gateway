@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PaymentCancelResponse",
+  "type": "object",
+  "additionalProperties": false,
+
+  "allOf": [{ "$ref": "../_common/base-response.json" }],
+
+  "required": ["paymentId"],
+
+  "properties": {
+    "paymentId": { "$ref": "../_common/uuid.json" }
+  }
+}
