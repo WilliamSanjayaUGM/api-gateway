@@ -184,26 +184,34 @@ gateway:
     skip-if-no-content-length: true
     warn-threshold: 200000
 
+keycloak:
+  realm: pt-sanjaya-grocery
+  # auth-server-url: http://localhost:8180
+  auth-server-url: http://localhost:8080
+  server-url: http://localhost:8180
+  webclient:
+    ssl-bundle: "key"
+
 security:
   oauth2:
     opaque-token:
-      introspection-uri: http://localhost:8180/realms/pt-sanjaya-grocery/protocol/openid-connect/token/introspect
+      introspection-uri: ${keycloak.server-url}/realms/${keycloak.realm}/protocol/openid-connect/token/introspect
       client-id: ${OAUTH_CLIENT_ID}
       client-secret: ${OAUTH_CLIENT_SECRET}
       expected-audience: api-gateway
-      expected-issuer: http://localhost:8180/realms/pt-sanjaya-grocery
+      expected-issuer: ${keycloak.server-url}/realms/${keycloak.realm}
       trusted-roles:
         - CUSTOMER
         - SUPPLIER
         - ADMIN
         - MANAGER
       auto-refresh-trusted-roles: true
-      keycloak-roles-endpoint: http://localhost:8180/realms/pt-sanjaya-grocery/protocol/openid-connect/roles
+      keycloak-roles-endpoint: ${keycloak.server-url}/realms/${keycloak.realm}/protocol/openid-connect/roles
     cache:
       introspection-cache-ttl-minutes: 5
     resourceserver:
       jwk-public-key: ${JWK_PUBLIC_KEY}
-      jwk-public-key-uri: http://localhost:8180/realms/pt-sanjaya-grocery/protocol/openid-connect/certs
+      jwk-public-key-uri: ${keycloak.server-url}/realms/${keycloak.realm}/protocol/openid-connect/certs
     excluded-paths:
       - /auth/signup
       - /auth/verify-email
@@ -300,7 +308,7 @@ bucket4j:
   timeout-ms: 750
   filters:
     - cache-name: buckets-login
-      url: /realms/pt-sanjaya-grocery/protocol/openid-connect/token
+      url: /realms/${keycloak.realm}/protocol/openid-connect/token
       key-resolver: userIpKeyResolver
       rate-limits:
         - bandwidths:
@@ -360,14 +368,6 @@ schema:
     user: "/user/{name}"        # create-v1.json → /user/create
     payment: "/payment/{name}"  # pay-v1.json   → /payment/pay
     common: "/{folder}/{name}"  # optional generic group
-
-
-keycloak:
-  realm: pt-sanjaya-grocery
-  # auth-server-url: http://localhost:8180
-  auth-server-url: http://localhost:8080
-  webclient:
-    ssl-bundle: "key"
 
 app:
   oauth2:
