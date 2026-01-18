@@ -186,7 +186,7 @@ gateway:
     warn-threshold: 200000
 
 keycloak:
-  realm: pt-sanjaya-grocery
+  realm: ${KEYCLOAK_REALM}
   # auth-server-url: http://localhost:8180
   auth-server-url: http://localhost:8080
   server-url: http://localhost:8180
