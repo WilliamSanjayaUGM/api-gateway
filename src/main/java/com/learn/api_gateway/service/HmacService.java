@@ -20,6 +20,7 @@ import org.springframework.stereotype.Component;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.learn.api_gateway.config.properties.RecaptchaConfigProperties;
+import com.learn.api_gateway.dto.CanonicalSecurityIdentity;
 
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -90,52 +91,56 @@ public class HmacService {
         String keyVersion = parts[0];
         String providedSignature = parts[1];
         
-        // 1. Extract timestamp from payload (e.g., "timestamp": 1730959923)
-        Instant requestTimestamp = extractTimestampFromPayload(payload);
-        if (requestTimestamp == null) {
-            log.warn("[traceId={}] No timestamp found in payload", traceId);
-            return Mono.just(false);
-        }
-
-        // 2. Check expiration based on configured validity seconds
-        if (Duration.between(requestTimestamp, Instant.now()).abs().getSeconds() > props.getHmac().getSignatureValiditySeconds()) {
-            log.warn("[traceId={}] Request signature expired (timestamp={})", traceId, requestTimestamp);
-            return Mono.just(false);
-        }
-        
-        // 3. Validate HMAC signature
         return resolveKeySpec(keyVersion)
                 .map(keySpec -> {
-                    byte[] expectedBytes = signBytes(payload, keySpec);
-                    byte[] providedBytes = Base64.getDecoder().decode(providedSignature);
-                    return MessageDigest.isEqual(expectedBytes, providedBytes);
+
+                    // Verify signature
+                    byte[] expected = signBytes(payload, keySpec);
+                    byte[] provided = Base64.getDecoder().decode(providedSignature);
+
+                    if (!MessageDigest.isEqual(expected, provided)) {
+                        return false;
+                    }
+
+                    // Enforce cryptographic expiry
+                    CanonicalSecurityIdentity identity;
+                    try {
+                        identity = objectMapper.readValue(
+                                payload,
+                                CanonicalSecurityIdentity.class
+                        );
+                    } catch (Exception e) {
+                        return false;
+                    }
+
+                    long nowMinute = Instant.now().getEpochSecond() / 60;
+                    long maxAge = props.getHmac().getSignatureValiditySeconds() / 60;
+
+                    return (nowMinute - identity.epochMinute()) <= maxAge;
                 })
-                .onErrorResume(e -> {
-                    log.warn("[traceId={}] HMAC verification failed: {}", traceId, e.getMessage());
-                    return Mono.just(false);
-                });
+                .onErrorReturn(false);
     }
     
     /**
      * Extracts a timestamp (ISO 8601 or epoch seconds) from JSON payload.
      * Assumes payload contains a field "timestamp".
      */
-    private Instant extractTimestampFromPayload(String payload) {
-        try {
-            JsonNode node = objectMapper.readTree(payload);
-            if (node.has("timestamp")) {
-                JsonNode tsNode = node.get("timestamp");
-                if (tsNode.isNumber()) {
-                    return Instant.ofEpochSecond(tsNode.asLong());
-                } else if (tsNode.isTextual()) {
-                    return Instant.parse(tsNode.asText());
-                }
-            }
-        } catch (Exception e) {
-            log.debug("Failed to parse timestamp from payload: {}", e.getMessage());
-        }
-        return null;
-    }
+//    private Instant extractTimestampFromPayload(String payload) {
+//        try {
+//            JsonNode node = objectMapper.readTree(payload);
+//            if (node.has("timestamp")) {
+//                JsonNode tsNode = node.get("timestamp");
+//                if (tsNode.isNumber()) {
+//                    return Instant.ofEpochSecond(tsNode.asLong());
+//                } else if (tsNode.isTextual()) {
+//                    return Instant.parse(tsNode.asText());
+//                }
+//            }
+//        } catch (Exception e) {
+//            log.debug("Failed to parse timestamp from payload: {}", e.getMessage());
+//        }
+//        return null;
+//    }
 
     private Mono<SecretKeySpec> resolveKeySpec(String keyId) {
         String traceId = Optional.ofNullable(MDC.get("X-Trace-Id")).orElse("N/A");

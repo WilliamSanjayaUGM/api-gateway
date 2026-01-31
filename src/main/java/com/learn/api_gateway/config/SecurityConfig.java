@@ -1,22 +1,37 @@
 package com.learn.api_gateway.config;
 
 import java.net.URI;
+import java.security.KeyStore;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManagerFactory;
+import java.net.http.HttpClient;
+
+import org.apache.http.impl.client.HttpClients;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.convert.converter.Converter;
+import org.springframework.core.io.Resource;
 import org.springframework.data.redis.connection.ReactiveRedisConnectionFactory;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.data.redis.core.ReactiveRedisTemplate;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.client.reactive.JdkClientHttpConnector;
+import org.springframework.security.authentication.AbstractAuthenticationToken;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.reactive.EnableWebFluxSecurity;
 import org.springframework.security.config.web.server.SecurityWebFiltersOrder;
 import org.springframework.security.config.web.server.ServerHttpSecurity;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.oauth2.core.DelegatingOAuth2TokenValidator;
 import org.springframework.security.oauth2.core.OAuth2Error;
 import org.springframework.security.oauth2.core.OAuth2TokenValidator;
@@ -28,6 +43,9 @@ import org.springframework.security.oauth2.jwt.JwtTimestampValidator;
 import org.springframework.security.oauth2.jwt.JwtValidators;
 import org.springframework.security.oauth2.jwt.NimbusReactiveJwtDecoder;
 import org.springframework.security.oauth2.jwt.ReactiveJwtDecoder;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
+import org.springframework.security.oauth2.server.resource.authentication.JwtGrantedAuthoritiesConverter;
+import org.springframework.security.oauth2.server.resource.authentication.ReactiveJwtAuthenticationConverter;
 import org.springframework.security.oauth2.server.resource.introspection.ReactiveOpaqueTokenIntrospector;
 import org.springframework.security.web.server.SecurityWebFilterChain;
 import org.springframework.security.web.server.context.ServerSecurityContextRepository;
@@ -35,9 +53,12 @@ import org.springframework.security.web.server.context.WebSessionServerSecurityC
 import org.springframework.security.web.server.header.ReferrerPolicyServerHttpHeadersWriter;
 import org.springframework.security.web.server.header.XFrameOptionsServerHttpHeadersWriter.Mode;
 import org.springframework.security.web.server.util.matcher.ServerWebExchangeMatcher;
+import org.springframework.web.client.RestOperations;
+import org.springframework.web.client.RestTemplate;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.reactive.CorsConfigurationSource;
 import org.springframework.web.cors.reactive.UrlBasedCorsConfigurationSource;
+import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.server.session.CookieWebSessionIdResolver;
 import org.springframework.web.server.session.WebSessionIdResolver;
 
@@ -51,6 +72,7 @@ import com.learn.api_gateway.service.TokenRevocationService;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.binder.MeterBinder;
+import io.netty.handler.ssl.SslContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import reactor.core.publisher.Mono;
@@ -67,7 +89,7 @@ public class SecurityConfig {
     @Value("${app.dev-mode:false}")
     private boolean devMode;
     
-    @Value("${security.mtls.enabled:false}")
+    @Value("${security.mtls.enabled:true}")
     private boolean mtlsEnabled;
     
     @Value("${app.oauth2.frontend-origin}")
@@ -77,7 +99,9 @@ public class SecurityConfig {
     public SecurityWebFilterChain springSecurityFilterChain(
             ServerHttpSecurity http,
             @Qualifier("cachingRevocationIntrospector") ReactiveOpaqueTokenIntrospector revocationAwareIntrospector,
-            OpaqueTokenProperties opaqueProps) {
+            ReactiveJwtDecoder jwtDecoder,
+            OpaqueTokenProperties opaqueProps
+            ) {
 
         // Derive introspection endpoint path for fine-grained access rules
         String introspectPath;
@@ -194,7 +218,7 @@ public class SecurityConfig {
 //		                               .getJwkPublicKeyUri()
 //		                )
 		        //ver2 (Nimbus)
-		        jwt.jwtDecoder(jwtDecoder(opaqueProps)))
+		        jwt.jwtDecoder(jwtDecoder))
 	        );
 	
 	    // === Optional mTLS simulation for internal services ===
@@ -268,10 +292,17 @@ public class SecurityConfig {
     }
     
     @Bean
-    public ReactiveJwtDecoder jwtDecoder(OpaqueTokenProperties opaqueProps) {
+    public ReactiveJwtDecoder jwtDecoder(OpaqueTokenProperties opaqueProps, 
+    		@Qualifier("keycloakWebClient") WebClient keycloakClient) {
     	String keycloakJwksUri = opaqueProps.getOauth2().getResourceserver().getJwkPublicKeyUri();
-        NimbusReactiveJwtDecoder decoder =
-                NimbusReactiveJwtDecoder.withJwkSetUri(keycloakJwksUri).build();
+    	NimbusReactiveJwtDecoder decoder;
+    	if(!devMode) {
+    		decoder = NimbusReactiveJwtDecoder.withJwkSetUri(keycloakJwksUri)
+    	                .webClient(keycloakClient)
+    	                .build();
+    	} else {
+    		decoder = NimbusReactiveJwtDecoder.withJwkSetUri(keycloakJwksUri).build();
+    	}
         
         Set<String> allowedAlgs = Set.of("RS256");
 

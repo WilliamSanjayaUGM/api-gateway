@@ -1,5 +1,6 @@
 package com.learn.api_gateway.config.properties;
 
+import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -44,9 +45,9 @@ public class TrustProperties {
     /**
      * Check whether an IP is trusted according to the configured CIDRs.
      */
-    public boolean isTrusted(String ip) {
-        if (ip == null || ip.isBlank()) return false;
-        return matchers.stream().anyMatch(m -> m.matches(ip));
+    public boolean isTrusted(InetAddress addr) {
+        if (addr == null) return false;
+        return matchers.stream().anyMatch(m -> m.matches(addr.getHostAddress()));
     }
 
     /**

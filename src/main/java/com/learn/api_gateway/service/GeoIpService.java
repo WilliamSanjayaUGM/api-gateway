@@ -153,7 +153,7 @@ public class GeoIpService {
                     return Mono.just(cached != null ? cached : "UNKNOWN");
                 });
     }
-    
+    /*
     private boolean isInternalIp(String ip) {
         return ip.startsWith("127.")
             || ip.startsWith("10.")
@@ -165,6 +165,7 @@ public class GeoIpService {
             || ip.startsWith("172.2")
             || "::1".equals(ip);
     }
+    */
     
     public record CountryDecision(String country, boolean blocked, boolean whitelisted, boolean unknown) {}
 }

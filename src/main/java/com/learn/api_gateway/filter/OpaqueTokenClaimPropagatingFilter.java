@@ -17,12 +17,14 @@ import java.util.stream.Collectors;
 
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cloud.gateway.route.Route;
 import org.springframework.cloud.gateway.support.ServerWebExchangeUtils;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.core.annotation.Order;
 import org.springframework.data.redis.core.ReactiveRedisTemplate;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.context.ReactiveSecurityContextHolder;
@@ -57,7 +59,7 @@ public class OpaqueTokenClaimPropagatingFilter implements WebFilter{
 	
 	private final OpaqueTokenProperties props;
 	private final RecaptchaConfigProperties recaptchaProps;
-    private final WebClient keycloakClient;
+	private final WebClient keycloakClient;
     private final ReactiveRedisTemplate<String, String> reactiveRedisTemplate;
     private final AuditService auditService;
     private final ErrorResponseWriter errorResponseWriter;
@@ -67,6 +69,9 @@ public class OpaqueTokenClaimPropagatingFilter implements WebFilter{
     private static final int MAX_JWT_SIZE = 10 * 1024; // 10 KB
     private static final String TOKEN_REPLAY_PREFIX = "replay:";
     private static final AntPathMatcher PATH_MATCHER = new AntPathMatcher();
+    
+    @Value("${keycloak.realm}")
+    private String realm;
 
     // Default public patterns (can be overridden by props.getExcludedPaths())
     private static final List<String> DEFAULT_PUBLIC_PATH_PATTERNS = List.of(
@@ -105,13 +110,15 @@ public class OpaqueTokenClaimPropagatingFilter implements WebFilter{
             ReactiveRedisTemplate<String, String> reactiveRedisTemplate,
             AuditService auditService,
             RecaptchaConfigProperties recaptchaProps,
-            ErrorResponseWriter errorResponseWriter) {
+            ErrorResponseWriter errorResponseWriter,
+            @Value("${keycloak.server-url}") String keycloakServerUrl) {
         this.props = props;
         this.recaptchaProps=recaptchaProps;
-        this.keycloakClient = keycloakClient;
+//        this.keycloakClient = keycloakClient;
         this.reactiveRedisTemplate = reactiveRedisTemplate;
         this.auditService = auditService;
         this.errorResponseWriter = errorResponseWriter;
+        this.keycloakClient = keycloakClient;
     }
 
     @Override
@@ -523,7 +530,10 @@ public class OpaqueTokenClaimPropagatingFilter implements WebFilter{
             return Mono.empty();
         }
         return keycloakClient.get()
-                .uri(props.getKeycloakRolesEndpoint())
+                .uri(uriBuilder -> uriBuilder.pathSegment(
+                		"realms", realm,"protocol","openid-connect","roles"
+                		).build()
+                )
                 .retrieve()
                 .bodyToMono(new ParameterizedTypeReference<List<String>>() {})
                 .doOnNext(fetchedRoles -> {

@@ -244,18 +244,35 @@ public class SessionToBearerTokenFilter implements WebFilter{
             SessionRecord session,
             String sessionId
     ) {
+    	log.info("-----Go to continueSession SessionToBearerToken session_token:{}", session.token());
         ServerHttpRequest mutated = exchange.getRequest()
                 .mutate()
                 .header(HttpHeaders.AUTHORIZATION, "Bearer " + session.token())
                 .build();
 
-        return reactiveRedisTemplate.opsForValue()
+//        return reactiveRedisTemplate.opsForValue()
+//                .set(
+//                        SESSION_PREFIX + sessionId,
+//                        serialize(session),
+//                        Duration.ofSeconds(sessionTtlSeconds)
+//                )
+//                .then(chain.filter(exchange.mutate().request(mutated).build()));
+        ServerWebExchange mutatedExchange =
+                exchange.mutate().request(mutated).build();
+
+        // Fire-and-forget Redis refresh (DO NOT block request pipeline)
+        reactiveRedisTemplate.opsForValue()
                 .set(
                         SESSION_PREFIX + sessionId,
                         serialize(session),
                         Duration.ofSeconds(sessionTtlSeconds)
                 )
-                .then(chain.filter(exchange.mutate().request(mutated).build()));
+                .subscribe(
+                    null,
+                    ex -> log.warn("Redis refresh failed sessionId={}", sessionId, ex)
+                );
+
+        return chain.filter(mutatedExchange);
     }
     
     private Mono<Void> redirectStepUpOnly(ServerWebExchange exchange) {

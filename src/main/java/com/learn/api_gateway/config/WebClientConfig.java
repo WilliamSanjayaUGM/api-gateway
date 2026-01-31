@@ -1,22 +1,23 @@
 package com.learn.api_gateway.config;
 
 import java.net.URI;
-import java.time.Duration;
-import java.util.Arrays;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
+
+import javax.net.ssl.SSLException;
 
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.boot.ssl.SslBundle;
+import org.springframework.boot.ssl.SslBundles;
 import org.springframework.cloud.client.circuitbreaker.ReactiveCircuitBreakerFactory;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
 import org.springframework.context.event.EventListener;
 import org.springframework.core.env.Environment;
-import org.springframework.core.io.ClassPathResource;
-import org.springframework.core.io.Resource;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
@@ -29,21 +30,17 @@ import org.springframework.web.reactive.function.client.WebClientResponseExcepti
 
 import com.learn.api_gateway.config.properties.GeoIpProperties;
 import com.learn.api_gateway.config.properties.OpaqueTokenProperties;
-import com.learn.api_gateway.config.properties.RecaptchaConfigProperties;
 import com.learn.api_gateway.util.TraceConstants;
 
 import io.netty.channel.ChannelOption;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
-import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.handler.timeout.ReadTimeoutHandler;
 import io.netty.handler.timeout.WriteTimeoutHandler;
-import io.netty.resolver.DefaultAddressResolverGroup;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import reactor.core.publisher.Mono;
 import reactor.netty.http.client.HttpClient;
-import reactor.netty.resources.ConnectionProvider;
 
 @Configuration
 @Slf4j
@@ -99,115 +96,40 @@ public class WebClientConfig {
 
     // === SECURE WEBCLIENT (mTLS) ===
     @Bean
-    public WebClient secureWebClient(WebClient.Builder builder) {
-    	if (Arrays.asList(env.getActiveProfiles()).contains("prod")) {
-    		try {
-    			Resource ca = new ClassPathResource("certs/ca.crt");
-    			Resource cert = new ClassPathResource("certs/client.crt");
-    			Resource key = new ClassPathResource("certs/client.key");
+    @Primary
+    public WebClient secureWebClient(WebClient.Builder builder, SslBundles sslBundles) {
+    	SslBundle bundle = sslBundles.getBundle("internal-mtls");
 
-                SslContextBuilder ssl = SslContextBuilder.forClient();
-                if (ca.exists()) {
-                    ssl.trustManager(ca.getInputStream());
-                } else {
-                    ssl.trustManager(InsecureTrustManagerFactory.INSTANCE);
-                }
+        SslContext nettySslContext;
+        try {
+            nettySslContext =
+                    SslContextBuilder.forClient()
+                            .keyManager(bundle.getManagers().getKeyManagerFactory())
+                            .trustManager(bundle.getManagers().getTrustManagerFactory())
+                            .protocols("TLSv1.3", "TLSv1.2")
+                            .build();
+        } catch (SSLException e) {
+            throw new IllegalStateException("Failed to build Netty SSL context for mTLS", e);
+        }
 
-                if (cert.exists() && key.exists()) {
-                    ssl.keyManager(cert.getInputStream(), key.getInputStream());
-                }
-                
-                SslContext sslContext = ssl.build();
-
-                HttpClient httpClient = HttpClient.create()
-                        .secure(s -> s.sslContext(sslContext))
-                        .resolver(DefaultAddressResolverGroup.INSTANCE)
+        HttpClient httpClient =
+                HttpClient.create()
+                        .secure(ssl -> ssl.sslContext(nettySslContext))
                         .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000)
                         .doOnConnected(conn -> conn
-                                .addHandlerLast(new ReadTimeoutHandler(10, TimeUnit.SECONDS))
-                                .addHandlerLast(new WriteTimeoutHandler(10, TimeUnit.SECONDS))
+                                .addHandlerLast(new ReadTimeoutHandler(10))
+                                .addHandlerLast(new WriteTimeoutHandler(10))
                         );
 
-                return builder.clientConnector(new ReactorClientHttpConnector(httpClient))
-                        .codecs(c -> c.defaultCodecs().maxInMemorySize(MAX_IN_MEMORY_SIZE))
-                        .build();
-            } catch (Exception e) {
-                log.error("Failed to init secure WebClient: {}", e.getMessage(), e);
-                return builder.build();
-            }
-    	} else {
-            log.info("Using non-secure WebClient for dev/local profile");
-            return builder.build();
-        }
-    }
-
-    // === CAPTCHA CLIENT (external, low latency, no CB) ===
-//    @Bean
-//    public WebClient captchaWebClient(WebClient.Builder builder, RecaptchaConfigProperties props) {
-//        ConnectionProvider provider = ConnectionProvider.builder("recaptcha-pool")
-//                .maxConnections(props.getPool().getMaxConnections())
-//                .maxIdleTime(props.getPool().getMaxIdleTime())
-//                .maxLifeTime(props.getPool().getMaxLifeTime())
-//                .pendingAcquireTimeout(Duration.ofSeconds(5))
-//                .build();
-//
-//        HttpClient httpClient = HttpClient.create(provider)
-//                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, (int) props.getTimeouts().getConnect().toMillis())
-//                .responseTimeout(props.getTimeouts().getResponse())
-//                .doOnConnected(conn -> conn
-//                        .addHandlerLast(new ReadTimeoutHandler((int) props.getTimeouts().getRead().toSeconds(), TimeUnit.SECONDS))
-//                        .addHandlerLast(new WriteTimeoutHandler((int) props.getTimeouts().getWrite().toSeconds(), TimeUnit.SECONDS))
-//                );
-//
-//        return builder
-//                .baseUrl(props.getBaseUrl())
-//                .clientConnector(new ReactorClientHttpConnector(httpClient))
-//                .codecs(c -> c.defaultCodecs().maxInMemorySize(MAX_IN_MEMORY_SIZE))
-//                .build();
-//    }
-
-    // === KEYCLOAK CLIENT ===
-    @Bean
-    public WebClient keycloakWebClient(WebClient.Builder builder,
-            @Value("${spring.profiles.active}") String activeProfile,
-            OpaqueTokenProperties opaqueTokenProperties,
-            ObjectProvider<WebClient> secureWebClientProvider) {
-    	
-    	String realmBaseUrl = opaqueTokenProperties.getExpectedIssuer();
-    	WebClient.Builder baseBuilder;
-
-        if ("prod".equalsIgnoreCase(activeProfile)) {
-            WebClient secureClient = secureWebClientProvider.getIfAvailable();
-            if (secureClient != null) {
-                baseBuilder = WebClient.builder()
-                        .clientConnector(new ReactorClientHttpConnector());
-            } else {
-                baseBuilder = builder.clone();
-            }
-        } else {
-            baseBuilder = builder.clone();
-        }
-
-        var cb = circuitBreakerFactory.create("keycloak");
-
-        return baseBuilder
-                .baseUrl(realmBaseUrl)
-                .defaultHeaders(h -> {
-                    h.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-                    h.setAccept(List.of(MediaType.APPLICATION_JSON));
-                })
-                .filter(ExchangeFilterFunction.ofResponseProcessor(resp ->
-                        cb.run(Mono.just(resp), ex -> {
-                            log.warn("Keycloak unavailable: {}", ex.getMessage());
-                            return Mono.error(new IllegalStateException("Keycloak unavailable"));
-                        })
-                ))
+        return builder
+                .clientConnector(new ReactorClientHttpConnector(httpClient))
+                .codecs(c -> c.defaultCodecs().maxInMemorySize(MAX_IN_MEMORY_SIZE))
                 .build();
     }
 
     // === GEOIP CLIENT ===
     @Bean
-    public WebClient geoIpWebClient(WebClient secureWebClient) {
+    public WebClient geoIpWebClient(@Qualifier("secureWebClient") WebClient secureWebClient) {
         String remoteUrl = geoIpProperties.getRefresh().getRemoteUrl();
         var cb = circuitBreakerFactory.create("geoip-service");
 

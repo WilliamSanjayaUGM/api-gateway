@@ -1,5 +1,6 @@
 package com.learn.api_gateway.filter;
 
+import java.net.InetAddress;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Collections;
@@ -20,6 +21,7 @@ import org.springframework.web.server.WebFilterChain;
 
 import com.learn.api_gateway.config.properties.TrustProperties;
 import com.learn.api_gateway.service.GeoIpService;
+import com.learn.api_gateway.util.EdgeIpCanonicalizer;
 import com.learn.api_gateway.util.ErrorResponseWriter;
 import com.learn.api_gateway.util.ReactorMdc;
 
@@ -42,6 +44,7 @@ public class GeoIpFilter implements WebFilter{
 	private final GeoIpService geoIpService;
     private final MeterRegistry meterRegistry;
     private final ErrorResponseWriter errorResponseWriter;
+    private final EdgeIpCanonicalizer ipCanon;
 
     @Value("${geoip.whitelist.countries:}")
     private String whitelistCountries;
@@ -124,30 +127,7 @@ public class GeoIpFilter implements WebFilter{
     }
     
     private boolean isNonRoutable(String ip) {
-        if (ip == null || ip.isBlank()) {
-            return true;
-        }
-
-        // Loopback
-        if ("127.0.0.1".equals(ip) || "::1".equals(ip)) {
-            return true;
-        }
-
-        // IPv6 link-local
-        if (ip.startsWith("fe80:")) {
-            return true;
-        }
-
-        // IPv6 ULA
-        if (ip.startsWith("fc") || ip.startsWith("fd")) {
-            return true;
-        }
-
-        // RFC1918 IPv4
-        if (ip.startsWith("10.")) return true;
-        if (ip.startsWith("192.168.")) return true;
-        if (ip.matches("^172\\.(1[6-9]|2\\d|3[0-1])\\..*")) return true;
-
-        return false;
+        InetAddress addr = ipCanon.parse(ip);
+        return ipCanon.isNonRoutable(addr);
     }
 }

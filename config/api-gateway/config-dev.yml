@@ -1,22 +1,25 @@
 server:
   port: 4000
   forward-headers-strategy: native
+  # forward-headers-strategy: none
   ssl:
-    enabled: false #false in dev so it wouldn't redirect to https
-  #   protocol: TLS
-  #   enabled-protocols: TLSv1.3,TLSv1.2
-  #   ciphers: >
-  #     TLS_AES_256_GCM_SHA384,
-  #     TLS_CHACHA20_POLY1305_SHA256,
-  #     TLS_AES_128_GCM_SHA256
-  #   key-store: classpath:keystore/gateway-server-keystore.p12
-  #   key-store-password: ${GATEWAY_KEYSTORE_PASSWORD}
-  #   key-store-type: PKCS12
-  #   key-alias: gateway
-  #   trust-store: classpath:keystore/gateway-truststore.p12
-  #   trust-store-password: ${GATEWAY_TRUSTSTORE_PASSWORD}
-  #   trust-store-type: PKCS12
-  #   client-auth: need
+    enabled: true
+    ssl-provider: JDK
+    protocol: TLS
+    enabled-protocols: TLSv1.3,TLSv1.2
+    ciphers: >
+      TLS_AES_256_GCM_SHA384,
+      TLS_AES_128_GCM_SHA256,
+      TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+      TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+    session-timeout: 300
+    key-store: classpath:keystore/api-gateway-keystore.p12
+    key-store-password: ${KEYSTORE_PASSWORD}
+    key-store-type: PKCS12
+    trust-store: classpath:keystore/api-gateway-truststore.p12
+    trust-store-password: ${TRUSTORE_PASSWORD}
+    trust-store-type: PKCS12
+    key-alias: api-gateway
   # http2:
   #   enabled: true
   max-http-request-header-size: 16KB
@@ -30,26 +33,66 @@ server:
 spring:
   application:
     name: api-gateway
+  ssl:
+    bundle:
+      jks:
+        internal-mtls:
+          key:
+            store: classpath:keystore/api-gateway-keystore.p12
+            password: ${KEYSTORE_PASSWORD}
+            alias: api-gateway
+          trust:
+            store: classpath:keystore/api-gateway-truststore.p12
+            password: ${TRUSTORE_PASSWORD}
   http:
     codecs:
       max-in-memory-size: 1MB
   cloud:
     consul:
       discovery:
-        reactive:
-          enabled: true
-          register: true
-          service-name: api-gateway
-          prefer-ip-address: true
-          heartbeat:
-            enabled: true
-          health-check-interval: 15s
+        # reactive:
+        #   enabled: true
+        #   register: true
+        #   service-name: api-gateway
+        #   heartbeat:
+        #     enabled: true
+        #   health-check-interval: 15s
+        enabled: true
+        register: true
+        service-name: api-gateway
+
+        scheme: https
+        health-check-path: /actuator/health
+        health-check-interval: 10s
+        health-check-tls-skip-verify: true
+        prefer-ip-address: false
+    loadbalancer:
+      webclient:
+        ssl:
+          bundle: internal-mtls
+      use-hostname: true
+      use404: true
     gateway:
-      default-filters:
-        - DedupeResponseHeader=Access-Control-Allow-Origin Access-Control-Allow-Credentials
-        # - name: SecureHeaders   # adds XSS, FrameOptions, CSP, etc. No need anymore because already have our own SecurityHeaderFilter
       server:
         webflux:
+          default-filters:
+            - name: PreserveHostHeader
+            - DedupeResponseHeader=Access-Control-Allow-Origin Access-Control-Allow-Credentials
+            # - name: SecureHeaders   # adds XSS, FrameOptions, CSP, etc. No need anymore because already have our own SecurityHeaderFilter
+          httpclient:
+            ssl:
+              use-insecure-trust-manager: false
+              handshake-timeout: 10s
+              close-notify-flush-timeout: 5s
+
+              key-store: classpath:keystore/api-gateway-keystore.p12
+              key-store-password: ${KEYSTORE_PASSWORD}
+              key-store-type: PKCS12
+
+              trust-store: classpath:keystore/api-gateway-truststore.p12
+              trust-store-password: ${TRUSTORE_PASSWORD}
+              trust-store-type: PKCS12
+              bundle: internal-mtls
           discovery:
             locator:
               enabled: true
@@ -59,10 +102,9 @@ spring:
             cors-configurations:
               '[/**]':
                 allowedOrigins:
-                  - "https://frontend.example.com"
-                  - "http://localhost:3000"
+                  - "https://localhost:8088"
                   - "http://localhost:5173"
-                allowedMethods: [GET, POST, PUT, DELETE, OPTIONS]
+                allowedMethods: [GET, POST, OPTIONS]
                 allowedHeaders:
                   - Authorization
                   - Content-Type
@@ -77,9 +119,13 @@ spring:
                 maxAge: 3600   # cache CORS preflight for 1h
           routes:
             - id: keycloak
-              uri: http://localhost:8180
+              uri: https://localhost:8443
               predicates:
-                - Path=/realms/*/protocol/openid-connect/auth,/realms/*/protocol/openid-connect/token
+                - Path=
+                    /realms/*/protocol/openid-connect/auth,
+                    /realms/*/protocol/openid-connect/token,
+                    /realms/*/protocol/openid-connect/logout,
+                    /realms/*/login-actions/**
               filters:
                 - name: Bucket4jRateLimit
                   args:
@@ -104,7 +150,7 @@ spring:
               filters:
                 - RewritePath=/auth/(?<segment>.*), /v1/auth/${segment}
               metadata:
-                internal-auth: none  
+                internal-auth: none
             - id: dashboard-service
               uri: lb://dashboard-service
               predicates:
@@ -187,8 +233,8 @@ gateway:
 keycloak:
   realm: ${KEYCLOAK_REALM}
   # auth-server-url: http://localhost:8180
-  auth-server-url: http://localhost:8080
-  server-url: http://localhost:8180
+  auth-server-url: https://localhost:8443
+  server-url: https://localhost:8443
   webclient:
     ssl-bundle: "key"
 
@@ -296,8 +342,8 @@ security:
     issuer: api-gateway
     ttl-seconds: 60
     keys:
-      k1: ${INTERNAL_JWT_KEY_K1_BASE64}
-      k2: ${INTERNAL_JWT_KEY_K2_BASE64}
+      k1: ${INTERNAL_JWT_KEY_K1}
+      k2: ${INTERNAL_JWT_KEY_K2}
     active-key-id: k1
   session:
     cookie-name: API-SESSION
@@ -371,9 +417,9 @@ schema:
 
 app:
   oauth2:
-    redirect-uri: http://localhost:4000/oauth-proxy/callback
-    frontend-origin: http://localhost:8088
-  dev-mode: true
+    redirect-uri: https://localhost:4000/oauth-proxy/callback
+    frontend-origin: https://localhost:8088
+  dev-mode: false
 
 geoip:
   blocked-countries:
@@ -393,7 +439,7 @@ geoip:
     enabled: true
     leader-only: false
     remote-url: https://example.com/GeoLite2-Country.mmdb
-    expected-sha256: ${GEOIP_EXPECTED_SHA256}
+    expected-sha256: ${GEOIP_EXPECTED_KEY}
   fail-fast: true
   webclient:
     ssl-bundle: "key"
@@ -424,12 +470,21 @@ logging:
     org.springframework.security.oauth2: WARN
     org.springframework.web.reactive.function.client.ExchangeFunctions: WARN
     reactor.netty.http.client: DEBUG
+    reactor.netty.transport: DEBUG
+    org.springframework.cloud.loadbalancer: DEBUG
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss} %-5level [%X{traceId}] %logger{36} - %msg%n"
 
 management:
   server:
     port: 9001
+    ssl:
+      enabled: true
+      client-auth: none
+      key-store: classpath:keystore/api-gateway-keystore.p12
+      key-store-password: ${KEYSTORE_PASSWORD}
+      key-store-type: PKCS12
+      key-alias: api-gateway
   endpoints:
     web:
       exposure:

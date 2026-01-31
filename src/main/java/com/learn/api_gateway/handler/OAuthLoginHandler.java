@@ -45,6 +45,7 @@ import com.learn.api_gateway.resolver.ClientTypeResolver;
 import com.learn.api_gateway.resolver.ClientTypeResolver.ClientType;
 import com.learn.api_gateway.service.RecaptchaService;
 import com.learn.api_gateway.util.ErrorResponseWriter;
+import com.learn.api_gateway.util.IpUtil;
 
 import jakarta.annotation.Nullable;
 import lombok.extern.slf4j.Slf4j;
@@ -60,6 +61,7 @@ public class OAuthLoginHandler {
     private final ErrorResponseWriter errorResponseWriter;
     private final OpaqueTokenProperties opaqueTokenProperties;
     private final WebClient keycloakClient;
+    private final IpUtil ipUtil;
     
     @Value("${keycloak.auth-server-url}")
     private String keycloakAuthServerUrl;
@@ -87,14 +89,16 @@ public class OAuthLoginHandler {
           OpaqueTokenProperties opaqueTokenProperties,
           ClientTypeResolver clientTypeResolver,
           ObjectMapper objectMapper,
-          ErrorResponseWriter errorResponseWriter) {
+          ErrorResponseWriter errorResponseWriter, IpUtil ipUtil,
+          @Value("${keycloak.server-url}") String keycloakServerUrl) {
       this.recaptchaService = recaptchaService;
       this.reactiveRedisTemplate = reactiveRedisTemplate;
-      this.keycloakClient = keycloakClient;
       this.opaqueTokenProperties=opaqueTokenProperties;
       this.clientTypeResolver=clientTypeResolver;
       this.objectMapper=objectMapper;
       this.errorResponseWriter = errorResponseWriter;
+      this.ipUtil = ipUtil;
+      this.keycloakClient = keycloakClient;
   }
     
     private static final String ACTIVE_SESSION_PREFIX = "user:%s:active-session";
@@ -145,7 +149,7 @@ public class OAuthLoginHandler {
     }
 	
 	private Mono<Void> loginInternal(String recaptchaToken, ServerWebExchange exchange) {
-		String clientIp = normalizeIp((String) exchange.getAttribute(ClientIpFilter.ATTR_CLIENT_IP));
+		String clientIp = ipUtil.normalizeIp((String) exchange.getAttribute(ClientIpFilter.ATTR_CLIENT_IP));
         String rateLimitKey = "oauth2:login:ip:" + clientIp;
         
         log.info("----oAuthProxyLogin clientIp proof {}, with rateLimitKey {}",clientIp, rateLimitKey);
@@ -314,15 +318,6 @@ public class OAuthLoginHandler {
                 });
 	}
 	
-	private String normalizeIp(String ip) {
-        if (ip == null) return "unknown";
-        // normalize IPv6-mapped IPv4
-        if (ip.startsWith("::ffff:")) {
-            return ip.substring(7);
-        }
-        return ip;
-    }
-	
 	private Mono<Void> callbackInternal(String code, String state, ServerWebExchange exchange) {
 		String traceId = exchange.getAttributeOrDefault("traceId", UUID.randomUUID().toString());
         log.info("[traceId={}] /oauth-proxy/callback called", traceId);
@@ -420,7 +415,10 @@ public class OAuthLoginHandler {
                 .encodeToString((clientId + ":" + clientSecret).getBytes(StandardCharsets.UTF_8));
 
         return keycloakClient.post()
-                .uri("/protocol/openid-connect/token")
+                .uri(uriBuilder -> uriBuilder.pathSegment(
+                		"realms", realm,"protocol","openid-connect","token"
+                		).build()
+                )
                 .header(HttpHeaders.CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(HttpHeaders.AUTHORIZATION, "Basic " + basicAuth)
                 .body(BodyInserters.fromFormData(form))
@@ -538,7 +536,10 @@ public class OAuthLoginHandler {
 
         // Opaque token -> introspect
         return keycloakClient.post()
-                .uri("/protocol/openid-connect/token/introspect")
+                .uri(uriBuilder -> uriBuilder.pathSegment(
+                		"realms", realm,"protocol","openid-connect","token","introspect"
+                		).build()
+                )
                 .header(HttpHeaders.CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .body(BodyInserters.fromFormData("token", accessToken))
                 .retrieve()

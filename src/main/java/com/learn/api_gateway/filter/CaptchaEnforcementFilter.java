@@ -8,11 +8,14 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 
+import javax.net.ssl.SSLHandshakeException;
+
 import org.apache.commons.codec.digest.DigestUtils;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
+import org.springframework.cloud.gateway.support.ServerWebExchangeUtils;
 import org.springframework.core.Ordered;
 import org.springframework.core.ResolvableType;
 import org.springframework.data.redis.core.ReactiveRedisTemplate;
@@ -31,6 +34,7 @@ import org.springframework.web.server.ServerWebExchange;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.learn.api_gateway.config.properties.RecaptchaConfigProperties;
+import com.learn.api_gateway.dto.CanonicalSecurityIdentity;
 import com.learn.api_gateway.dto.CaptchaResult;
 import com.learn.api_gateway.service.AuditService;
 import com.learn.api_gateway.service.GeoIpService;
@@ -38,6 +42,7 @@ import com.learn.api_gateway.service.HmacService;
 import com.learn.api_gateway.service.RecaptchaService;
 import com.learn.api_gateway.util.ErrorResponseWriter;
 import com.learn.api_gateway.util.GatewayUtil;
+import com.learn.api_gateway.util.IpUtil;
 import com.learn.api_gateway.util.TraceConstants;
 
 import lombok.RequiredArgsConstructor;
@@ -62,6 +67,7 @@ public class CaptchaEnforcementFilter implements GlobalFilter, Ordered{
     private final AuditService auditService;
     private final ErrorResponseWriter errorResponseWriter;
     private final GeoIpService geoIpService;
+    private final IpUtil ipUtil;
 
     private final FormHttpMessageReader formReader = new FormHttpMessageReader();
 
@@ -87,84 +93,135 @@ public class CaptchaEnforcementFilter implements GlobalFilter, Ordered{
         String path = exchange.getRequest().getURI().getPath();
         String clientIp = maskIp(getResolvedClientIp(exchange));
         
-        log.info("------------CaptchaEnforcementFilter is checked, path {}, clientIp {}--------", path, clientIp);
-        
-        if (path.startsWith("/realms/") &&
-        	path.contains("/protocol/openid-connect/") &&
-        	(path.contains("/auth") || path.contains("/token"))) {
+        log.info("-----CaptchaEnforcementFilter run for path {}, clientIp {}", path, clientIp);
 
-        	log.info("Skipping CaptchaEnforcementFilter for Keycloak SSO path {}", path);
-        	return chain.filter(exchange);
+        if (path.startsWith("/realms/")
+                && path.contains("/protocol/openid-connect/")
+                && (path.contains("/auth") || path.contains("/token"))) {
+
+            log.info("Skipping CaptchaEnforcementFilter for Keycloak SSO path {}", path);
+            return chain.filter(exchange);
         }
-        
+
         if (path.startsWith("/oauth-proxy/")) {
-            log.debug("CaptchaEnforcementFilter bypassed for oauth-proxy path={}", path);
             return chain.filter(exchange);
         }
 
         if (isTokenEndpoint(path)) {
             return gatewayUtil.cacheRequestBody(exchange)
-                    .flatMap(mutatedEx -> formReader.readMono(
-                                    ResolvableType.forClassWithGenerics(MultiValueMap.class, String.class, String.class),
-                                    mutatedEx.getRequest(),
-                                    Collections.emptyMap())
-                            .defaultIfEmpty(new LinkedMultiValueMap<>())
-                            .flatMap(params -> {
-                                String username = Optional.ofNullable(params.getFirst("username"))
-                                        .map(u -> maskUser(u.toLowerCase(Locale.ROOT))).orElse("");
-                                String clientId = Optional.ofNullable(params.getFirst("client_id"))
-                                        .map(c -> c.toLowerCase(Locale.ROOT)).orElse("");
+                    .flatMap(mutated ->
+                            formReader.readMono(
+                                            ResolvableType.forClassWithGenerics(
+                                                    MultiValueMap.class, String.class, String.class),
+                                            mutated.getRequest(),
+                                            Collections.emptyMap())
+                                    .defaultIfEmpty(new LinkedMultiValueMap<>())
+                                    .flatMap(params -> {
 
-                                String ipKeyRaw = clientIp;
-                                String userKeyRaw = clientIp + ":" + clientId + ":" + username;
+                                        String username = Optional.ofNullable(params.getFirst("username"))
+                                                .map(u -> maskUser(u.toLowerCase(Locale.ROOT)))
+                                                .orElse("");
 
-                                return Mono.zip(hmacService.sign(ipKeyRaw, "gateway"),
-                                                hmacService.sign(userKeyRaw, "gateway"))
-                                        .flatMap(tuple -> {
-                                            String ipKey = tuple.getT1();
-                                            String userKey = tuple.getT2();
+                                        String clientId = Optional.ofNullable(params.getFirst("client_id"))
+                                                .map(String::toLowerCase)
+                                                .orElse("");
 
-                                            return shouldRequireCaptcha(ipKey, true)
-                                                    .zipWith(shouldRequireCaptcha(userKey, true))
-                                                    .flatMap(requireTuple -> {
-                                                        boolean requireCaptcha = requireTuple.getT1() || requireTuple.getT2();
-                                                        if (!requireCaptcha) {
-                                                        	return isCaptchaVerified(mutatedEx)
-                                                                    .flatMap(verified -> {
+                                        return Mono.zip(
+                                                        signIdentity(mutated, clientIp,
+                                                                props.getLoginAction(), null, null, path),
+                                                        signIdentity(mutated, clientIp,
+                                                                props.getLoginAction(), clientId, username, path)
+                                                )
+                                                .flatMap(tuple -> {
+
+                                                    String ipKey   = tuple.getT1();
+                                                    String userKey = tuple.getT2();
+
+                                                    return shouldRequireCaptcha(ipKey, true)
+                                                            .zipWith(shouldRequireCaptcha(userKey, true))
+                                                            .flatMap(req -> {
+
+                                                                boolean requireCaptcha =
+                                                                        req.getT1() || req.getT2();
+
+                                                                if (!requireCaptcha) {
+                                                                    return isCaptchaVerified(
+                                                                            mutated,
+                                                                            props.getLoginAction(),
+                                                                            clientId,
+                                                                            username
+                                                                    ).flatMap(verified -> {
                                                                         if (verified) {
-                                                                            log.info("Captcha previously verified → skipping captcha enforcement");
-                                                                            return chainWithOutcome(mutatedEx, chain, ResetMode.ON_SUCCESS, userKey, ipKey);
+                                                                            return chainWithOutcome(
+                                                                                    mutated,
+                                                                                    chain,
+                                                                                    ResetMode.ON_SUCCESS,
+                                                                                    userKey,
+                                                                                    ipKey
+                                                                            );
                                                                         }
-
-                                                                        // not verified → enforce now
-                                                                        return enforceCaptcha(mutatedEx,chain,clientIp,props.getLoginAction(),new String[]{userKey, ipKey},
-                                                                                params,ResetMode.ON_SUCCESS);
+                                                                        return enforceCaptcha(
+                                                                                mutated,
+                                                                                chain,
+                                                                                clientIp,
+                                                                                props.getLoginAction(),
+                                                                                new String[]{userKey, ipKey},
+                                                                                params,
+                                                                                ResetMode.ON_SUCCESS,
+                                                                                clientId,
+                                                                                username
+                                                                        );
                                                                     });
-                                                        }
-                                                        return enforceCaptcha(mutatedEx,chain,clientIp,props.getLoginAction(),new String[]{userKey, ipKey},
-                                                                params,ResetMode.ON_SUCCESS);
-                                                    });
-                                        })
-                                        .onErrorResume(ex -> {
-                                            log.error("❌ HMAC generation error: {}", ex.toString());
-                                            return captchaForbidden(mutatedEx, "hmac_error", isTokenEndpoint(path));
-                                        });
-                            }));
-        }
+                                                                }
 
+                                                                return enforceCaptcha(
+                                                                        mutated,
+                                                                        chain,
+                                                                        clientIp,
+                                                                        props.getLoginAction(),
+                                                                        new String[]{userKey, ipKey},
+                                                                        params,
+                                                                        ResetMode.ON_SUCCESS,
+                                                                        clientId,
+                                                                        username
+                                                                );
+                                                            });
+                                                });
+                                    }));
+        }
+        
         if (path.startsWith("/auth/signup")) {
-        	return isCaptchaVerified(exchange)
-        	        .flatMap(verified -> {
-        	            if (verified) {
-        	                log.info("Captcha previously verified → skipping captcha enforcement (signup)");
-        	                return chain.filter(exchange);
-        	            }
-        	            
-        	            return hmacService.sign(clientIp, "gateway")
-        	                    .flatMap(ipKey -> enforceCaptcha(exchange, chain, clientIp, props.getSignupAction(),
-        	                            new String[]{ipKey}, null, ResetMode.ON_SUCCESS));
-        	        })
-        	        .onErrorResume(ex -> captchaForbidden(exchange, "hmac_error", false));
+        	// Stable identity for signup flow (no client_id / username yet)
+            final String signupClientId = "signup";
+            final String signupUsername = "anonymous";
+            
+            return isCaptchaVerified(
+                    exchange,
+                    props.getSignupAction(),
+                    signupClientId,
+                    signupUsername
+            )
+            .flatMap(verified -> {
+                if (verified) {
+                    log.info("Captcha previously verified → skipping captcha enforcement (signup)");
+                    return chain.filter(exchange);
+                }
+
+                return hmacService.sign(clientIp, "gateway")
+                        .flatMap(ipKey ->
+                                enforceCaptcha(exchange, chain,clientIp, props.getSignupAction(),
+                                		new String[]{ipKey}, null, ResetMode.ON_SUCCESS, signupClientId,
+                                        signupUsername
+                                )
+                        );
+            })
+            .onErrorResume(SSLHandshakeException.class, ex ->
+		            errorResponseWriter.write(
+		                exchange,
+		                HttpStatus.BAD_GATEWAY,
+		                "Upstream TLS failure"
+		            )
+		    );
         }
 
         return chain.filter(exchange);
@@ -194,213 +251,116 @@ public class CaptchaEnforcementFilter implements GlobalFilter, Ordered{
         throw new IllegalStateException("Client IP unavailable");
     }
 
-    private Mono<Void> enforceCaptcha(ServerWebExchange exchange,
-                                      GatewayFilterChain chain,
-                                      String clientIp,
-                                      String action,
-                                      String[] identifiers,
-                                      MultiValueMap<String, String> formParams,
-                                      ResetMode resetMode) {
-    	
-    	return extractCaptchaToken(exchange, formParams)
-                .switchIfEmpty(
-                        captchaForbidden(
-                                exchange,
-                                "captcha_missing",
-                                isTokenEndpoint(exchange.getRequest().getPath().value())
-                        ).then(Mono.empty())
-                )
-                .flatMap(captchaToken -> {
+    private Mono<Void> enforceCaptcha(
+            ServerWebExchange exchange,
+            GatewayFilterChain chain,
+            String clientIp,
+            String action,
+            String[] identifiers,
+            MultiValueMap<String, String> formParams,
+            ResetMode resetMode,
+            String clientId,
+            String username) {
 
-                    String replayKey =
-                            REPLAY_KEY_PREFIX + DigestUtils.sha256Hex(captchaToken).substring(0, 32);
+        return extractCaptchaToken(exchange, formParams)
+        	.switchIfEmpty(Mono.defer(() -> {
+        		log.warn(
+        				"[Captcha] MISSING TOKEN action={} ip={} clientId={} username={}",
+        	            action, clientIp, clientId, username
+        	    );
+        	    return Mono.error(new MissingCaptchaException());
+        	 }))
+            .flatMap(captchaToken -> {
 
-                    return recaptchaService
-                            .validate(captchaToken, clientIp, action, action, exchange)
-                            .flatMap(result -> {
+                String replayKeySource =
+                        props.getEnvironmentSalt() + "|" +
+                        exchange.getRequest().getURI().getScheme() + "|" +
+                        action + "|" +
+                        ipUtil.normalizeIp(clientIp) + "|" +
+                        clientId + "|" +
+                        username + "|" +
+                        DigestUtils.sha256Hex(captchaToken);
 
-                                /* =======================
-                                 * CAPTCHA PASSED
-                                 * ======================= */
-                                if (result == CaptchaResult.PASSED) {
+                String replayKey =
+                        REPLAY_KEY_PREFIX +
+                        DigestUtils.sha256Hex(replayKeySource).substring(0, 32);
 
-                                    auditService.auditInfo(
-                                            "CAPTCHA_PASSED",
-                                            null,
-                                            clientIp,
-                                            exchange.getRequest().getPath().value(),
-                                            "Captcha passed",
-                                            Map.of("action", action)
-                                    );
+                log.info(
+                    "[Captcha] TOKEN FOUND action={} ip={} replayKey={}",
+                    action, clientIp, replayKey
+                );
 
-                                    String fingerprint =
-                                            DigestUtils.sha256Hex(
-                                                    clientIp + "|" +
-                                                    exchange.getRequest()
-                                                            .getHeaders()
-                                                            .getFirst("User-Agent")
-                                            ).substring(0, 32);
+                return recaptchaService
+                        .validate(captchaToken, clientIp, action, action, exchange)
+                        .doOnNext(result ->
+                            log.info(
+                                "[Captcha] VALIDATION RESULT={} action={} ip={}",
+                                result, action, clientIp
+                            )
+                        )
+                        .flatMap(result -> {
 
-                                    String verifiedKey = "captcha:verified:" + fingerprint;
-
-                                    Mono<Void> persistCaptchaState =
-                                            reactiveRedisTemplate.opsForValue()
-                                                    .set(
-                                                            replayKey,
-                                                            "1",
-                                                            props.getRateLimit().getFailureWindow()
-                                                    )
-                                                    .then(
-                                                            reactiveRedisTemplate.opsForValue()
-                                                                    .set(
-                                                                            verifiedKey,
-                                                                            "1",
-                                                                            Duration.ofMinutes(
-                                                                                    props.getBypassMinutes()
-                                                                            )
-                                                                    )
-                                                    )
-                                                    .then();
-
-                                    /*
-                                     * IMPORTANT:
-                                     * - Let downstream fully control response
-                                     * - Do NOT commit response here
-                                     * - Only update Redis AFTER downstream completes
-                                     */
-                                    return persistCaptchaState
-                                            .then(
-                                                    chain.filter(exchange)
-                                            )
-                                            .then(Mono.defer(() -> {
-                                                HttpStatusCode status =
-                                                        exchange.getResponse().getStatusCode();
-
-                                                if (status == null || identifiers == null) {
-                                                    return Mono.empty();
-                                                }
-
-                                                boolean success =
-                                                        resetMode == ResetMode.ON_200
-                                                                ? status.value() == 200
-                                                                : status.is2xxSuccessful();
-
-                                                if (success) {
-                                                    return Flux.fromArray(identifiers)
-                                                            .flatMap(id ->
-                                                                    reactiveRedisTemplate.delete(
-                                                                            FAILURE_KEY_PREFIX + id
-                                                                    )
-                                                            )
-                                                            .then();
-                                                }
-
-                                                if (status.value() == 400 || status.value() == 401) {
-                                                    return Flux.fromArray(identifiers)
-                                                            .flatMap(this::recordFailure)
-                                                            .then();
-                                                }
-
-                                                return Mono.empty();
-                                            }));
-                                }
-
-                                /* =======================
-                                 * CAPTCHA INVALID
-                                 * ======================= */
-                                if (result == CaptchaResult.INVALID) {
-
-                                    auditService.auditWarn(
-                                            "CAPTCHA_FAILED",
-                                            null,
-                                            clientIp,
-                                            exchange.getRequest().getPath().value(),
-                                            "Captcha invalid",
-                                            Map.of("action", action)
-                                    );
-
-                                    return captchaForbidden(
-                                            exchange,
-                                            "captcha_invalid",
-                                            isTokenEndpoint(
-                                                    exchange.getRequest().getPath().value()
-                                            )
-                                    );
-                                }
-
-                                /* =======================
-                                 * CAPTCHA RATE LIMITED
-                                 * ======================= */
-                                if (result == CaptchaResult.RATE_LIMITED) {
-
-                                    auditService.auditWarn(
-                                            "CAPTCHA_RATE_LIMITED",
-                                            null,
-                                            clientIp,
-                                            exchange.getRequest().getPath().value(),
-                                            "Captcha rate limited",
-                                            Map.of("action", action)
-                                    );
-
-                                    return captchaForbidden(
-                                            exchange,
-                                            "captcha_rate_limited",
-                                            isTokenEndpoint(
-                                                    exchange.getRequest().getPath().value()
-                                            )
-                                    );
-                                }
-
-                                /* =======================
-                                 * PROVIDER ERROR
-                                 * ======================= */
-                                if (result == CaptchaResult.PROVIDER_ERROR) {
-
-                                    auditService.auditError(
-                                            "CAPTCHA_PROVIDER_ERROR",
-                                            null,
-                                            clientIp,
-                                            exchange.getRequest().getPath().value(),
-                                            "Captcha provider error",
-                                            Map.of("action", action)
-                                    );
-
-                                    /*
-                                     * FAIL-OPEN:
-                                     * - Do NOT touch response
-                                     * - Let downstream error propagate
-                                     */
-                                    if (!props.isFailClosedOnValidationError()) {
-                                        return chain.filter(exchange);
-                                    }
-
-                                    /*
-                                     * FAIL-CLOSED:
-                                     * - Gateway owns response
-                                     */
-                                    return captchaForbidden(
-                                            exchange,
-                                            "captcha_provider_error",
-                                            isTokenEndpoint(
-                                                    exchange.getRequest().getPath().value()
-                                            )
-                                    );
-                                }
-
-                                /* =======================
-                                 * SAFETY NET
-                                 * ======================= */
-                                log.error("Unexpected CaptchaResult={}", result);
-
-                                return captchaForbidden(
-                                        exchange,
-                                        "captcha_error",
-                                        isTokenEndpoint(
-                                                exchange.getRequest().getPath().value()
-                                        )
+                            if (result != CaptchaResult.PASSED) {
+                                log.warn(
+                                    "[Captcha] INVALID RESULT={} action={} ip={}",
+                                    result, action, clientIp
                                 );
-                            });
-                });
+                                return Mono.error(new InvalidCaptchaException());
+                            }
+
+                            String verifiedKey =
+                                    "captcha:verified:" +
+                                    captchaFingerprint(exchange, action, clientId, username);
+
+                            log.info(
+                                "[Captcha] PASSED action={} ip={} verifiedKey={}",
+                                action, clientIp, verifiedKey
+                            );
+
+                            return reactiveRedisTemplate.opsForValue()
+                                    .set(replayKey, "1", props.getRateLimit().getFailureWindow())
+                                    .then(
+                                        reactiveRedisTemplate.opsForValue()
+                                            .set(
+                                                verifiedKey,
+                                                "1",
+                                                Duration.ofMinutes(props.getBypassMinutes())
+                                            )
+                                    )
+                                    .then(
+                                    	    chainWithOutcome(exchange, chain, resetMode, identifiers)
+                                    	        .onErrorResume(ex -> {
+                                    	            log.error(
+                                    	                "[Captcha] Downstream failure AFTER captcha passed action={} ip={} type={}",
+                                    	                action, clientIp, ex.getClass().getSimpleName(), ex
+                                    	            );
+                                    	            return Mono.error(ex); // propagate
+                                    	        })
+                                    	);
+                        });
+            })
+            .onErrorResume(MissingCaptchaException.class, ex -> {
+                log.warn(
+                    "[Captcha] BLOCKED reason=captcha_missing action={} ip={}",
+                    action, clientIp
+                );
+                return captchaForbidden(
+                        exchange,
+                        "captcha_missing",
+                        isTokenEndpoint(exchange.getRequest().getPath().value())
+                );
+            })
+            .onErrorResume(InvalidCaptchaException.class, ex -> {
+                log.warn(
+                    "[Captcha] BLOCKED reason=captcha_invalid action={} ip={}",
+                    action, clientIp
+                );
+                return captchaForbidden(
+                        exchange,
+                        "captcha_invalid",
+                        isTokenEndpoint(exchange.getRequest().getPath().value())
+                );
+            });
     }
 
     private Mono<String> extractCaptchaToken(ServerWebExchange exchange, MultiValueMap<String, String> formParams) {        
@@ -426,7 +386,7 @@ public class CaptchaEnforcementFilter implements GlobalFilter, Ordered{
                 return Mono.just(bodyToken);
             }
         }
-
+        
         // 4. JSON body (for /auth/signup)
         return gatewayUtil.cacheRequestBody(exchange)
                 .flatMap(mutated -> gatewayUtil.getCachedRequestBodyAsString(mutated))
@@ -454,25 +414,37 @@ public class CaptchaEnforcementFilter implements GlobalFilter, Ordered{
         return path.startsWith("/realms/") && path.contains("/protocol/openid-connect/token");
     }
     
-    private Mono<Boolean> isCaptchaVerified(ServerWebExchange exchange) {
-        String clientIp = exchange.getAttribute(ClientIpFilter.ATTR_CLIENT_IP);
+    private Mono<Boolean> isCaptchaVerified(ServerWebExchange exchange,
+            String action,
+            String clientId,
+            String username) {
+    	
+    	String key =
+                "captcha:verified:" +
+                captchaFingerprint(exchange, action, clientId, username);
 
-        if (clientIp == null || clientIp.isBlank() || "unknown".equalsIgnoreCase(clientIp)) {
-            log.warn("Captcha verification skipped: client IP unresolved");
-            return Mono.just(false); // force captcha instead of crash
-        }
+        return reactiveRedisTemplate.hasKey(key).onErrorReturn(false);
+    }
+    
+    private String captchaFingerprint(
+            ServerWebExchange exchange,
+            String action,
+            String clientId,
+            String username) {
+    	String ip = ipUtil.normalizeIp(
+                (String) exchange.getAttribute(ClientIpFilter.ATTR_CLIENT_IP));
 
-        String ua = Optional.ofNullable(exchange.getRequest().getHeaders().getFirst("User-Agent"))
-                .orElse("unknown");
+        String scheme = exchange.getRequest().getURI().getScheme();
+        long minute = Instant.now().getEpochSecond() / 60;
 
-        String fingerprint = DigestUtils.sha256Hex(clientIp + "|" + ua).substring(0, 32);
-        String redisKey = "captcha:verified:" + fingerprint;
-
-        return reactiveRedisTemplate.hasKey(redisKey)
-                .onErrorResume(ex -> {
-                    log.error("Captcha verification Redis failure: {}", ex.toString());
-                    return Mono.just(false); // FAIL-CLOSED
-                });
+        return DigestUtils.sha256Hex(
+                scheme + "|" +
+                ip + "|" +
+                action + "|" +
+                clientId + "|" +
+                username + "|" +
+                minute
+        ).substring(0, 32);
     }
 
     private Mono<Boolean> shouldRequireCaptcha(String identifier, boolean defaultDecision) {
@@ -600,6 +572,55 @@ public class CaptchaEnforcementFilter implements GlobalFilter, Ordered{
                     );
                 });
     }
+    
+    private Mono<String> signIdentity(ServerWebExchange exchange, String action) {
+        String ip = ipUtil.normalizeIp(
+                (String) exchange.getAttribute(ClientIpFilter.ATTR_CLIENT_IP)
+        );
+        String scheme = exchange.getRequest().getURI().getScheme();
+
+        CanonicalSecurityIdentity identity =
+                new CanonicalSecurityIdentity(
+                		scheme,
+                        ip,
+                        action,
+                        exchange.getRequest().getPath().value(),
+                        null,null,
+                        Instant.now().getEpochSecond() / 60
+                );
+
+        try {
+            return hmacService.sign(objectMapper.writeValueAsString(identity), "gateway");
+        } catch (Exception e) {
+            return Mono.error(e);
+        }
+    }
+    
+    private Mono<String> signIdentity(
+    		ServerWebExchange exchange,
+            String ip,
+            String action,
+            String clientId,
+            String username,
+            String path
+    ) {
+    	String scheme = exchange.getRequest().getURI().getScheme();
+    	CanonicalSecurityIdentity identity =
+            new CanonicalSecurityIdentity(
+            	scheme,
+                ip,
+                action,
+                path,
+                clientId,
+                username,
+                Instant.now().getEpochSecond() / 60
+            );
+    	try {
+    		return hmacService.sign(objectMapper.writeValueAsString(identity),"gateway");
+    	} catch (Exception e) {
+            return Mono.error(e);
+        }
+    }
 
     private String maskIp(String ip) {
         if (ip == null) return "unknown";
@@ -611,4 +632,7 @@ public class CaptchaEnforcementFilter implements GlobalFilter, Ordered{
         if (username == null || username.length() < 3) return "us***";
         return username.substring(0, 2) + "***" + username.charAt(username.length() - 1);
     }
+    
+    static class MissingCaptchaException extends RuntimeException {}
+    static class InvalidCaptchaException extends RuntimeException {}
 }
